@@ -9,7 +9,10 @@ const QuizStatus = {
   COMPLETED: 'completed'
 };
 
-// ==================== MOCK DATA ====================
+// ==================== API BASE URL ====================
+const API_BASE = 'https://bouzibackend-master-gj0lvd.laravel.cloud';
+
+// ==================== MOCK DATA (Fallback) ====================
 const etudiants = [
   { id: 1, name: "mohamedbouzu", plan: "group", user: "alice123", password: "password123" },
   { id: 2, name: "soufianelasmar", plan: "individual", user: "bob456", password: "password456" },
@@ -103,6 +106,76 @@ const lseance = [
     }
   }
 ];
+
+// ==================== API SERVICE ====================
+const apiService = {
+  // Login to API
+  login: async (credentials) => {
+    try {
+      const response = await fetch(`${API_BASE}/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          email: credentials.user,
+          password: credentials.password
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Login failed');
+      }
+      
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('Login API error:', error);
+      throw error;
+    }
+  },
+
+  // Get all sessions from API
+  getSessions: async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/sessions`, {
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch sessions');
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Fetch sessions API error:', error);
+      throw error;
+    }
+  },
+
+  // Get call link for a session
+  getCallLink: async (sessionId) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/call-link/${sessionId}`, {
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch call link');
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Fetch call link API error:', error);
+      throw error;
+    }
+  },
+};
 
 // ==================== CONTEXTS ====================
 const AuthContext = React.createContext();
@@ -498,24 +571,47 @@ const Login = () => {
     setError('');
     setLoading(true);
 
-    await new Promise(resolve => setTimeout(resolve, 800));
-
-    const student = etudiants.find(etud => etud.user === credentials.user);
-    
-    if (!student) {
-      setError("Utilisateur non trouvé");
+    try {
+      // Try to login via API first
+      const response = await apiService.login(credentials);
+      
+      if (response.success) {
+        // Transform API response to match your app's user structure
+        const userData = {
+          id: response.user.id || Math.floor(Math.random() * 1000),
+          name: response.user.name || response.user.email.split('@')[0],
+          user: response.user.email,
+          plan: response.user.plan_type || 'group',
+          token: response.token || null
+        };
+        
+        auth.login(userData);
+      } else {
+        setError(response.message || "Nom d'utilisateur ou mot de passe incorrect");
+      }
+    } catch (err) {
+      console.error('API login failed, falling back to mock data:', err);
+      
+      // Fallback to mock data if API fails
+      await new Promise(resolve => setTimeout(resolve, 800));
+      const student = etudiants.find(etud => etud.user === credentials.user);
+      
+      if (!student) {
+        setError("Utilisateur non trouvé");
+        setLoading(false);
+        return;
+      }
+      
+      if (student.password !== credentials.password) {
+        setError("Mot de passe incorrect");
+        setLoading(false);
+        return;
+      }
+      
+      auth.login(student);
+    } finally {
       setLoading(false);
-      return;
     }
-    
-    if (student.password !== credentials.password) {
-      setError("Mot de passe incorrect");
-      setLoading(false);
-      return;
-    }
-    
-    auth.login(student);
-    setLoading(false);
   };
 
   return (
@@ -536,14 +632,14 @@ const Login = () => {
             
             <div className="form-group">
               <label htmlFor="user">
-                <i className="lni lni-user"></i> Nom d'utilisateur
+                <i className="lni lni-user"></i> Email / Nom d'utilisateur
               </label>
               <input 
                 type="text" 
                 id="user"
                 value={credentials.user}
                 onChange={(e) => setCredentials({...credentials, user: e.target.value})}
-                placeholder="Votre nom d'utilisateur"
+                placeholder="Votre email ou nom d'utilisateur"
                 required
                 disabled={loading}
               />
@@ -645,6 +741,7 @@ const StudentDashboard = () => {
   const [completedQuizzes, setCompletedQuizzes] = useState([]);
   const [quizStatus, setQuizStatus] = useState(QuizStatus.NOT_STARTED);
   const [quizResults, setQuizResults] = useState(null);
+  const [usingMockData, setUsingMockData] = useState(false);
 
   useEffect(() => {
     fetchSessions();
@@ -657,24 +754,53 @@ const StudentDashboard = () => {
   const fetchSessions = async () => {
     try {
       setLoading(true);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const studentPlan = auth.user.plan;
-      const filteredSessions = lseance.filter(session => 
-        session.plan === studentPlan || session.plan === 'group'
-      );
-      
-      setSessions(filteredSessions);
       setError(null);
-    } catch (err) {
-      console.error("Erreur de chargement des sessions:", err);
-      setError("Utilisation des données locales");
       
+      // Try to fetch from API
+      const sessionsData = await apiService.getSessions();
+      
+      // Filter sessions based on student's plan
+      const studentPlan = auth.user.plan;
+      const filteredSessions = sessionsData.filter(session => {
+        // If session plan is 'both', include it for all students
+        if (session.plan === 'both') return true;
+        // Include sessions that match student's plan
+        return session.plan === studentPlan;
+      });
+      
+      // Transform API data to match your component's expected format
+      const transformedSessions = filteredSessions.map(session => ({
+        id: session.id,
+        titre: session.titre || session.title,
+        cours: session.cours || session.course,
+        date: session.date,
+        description: session.description,
+        plan: session.plan,
+        call_link: session.call_link ? {
+          platform: session.call_link.platform || 'Zoom',
+          meeting_id: session.call_link.meeting_id || 'N/A',
+          password: session.call_link.meeting_password || '',
+          join_url: session.call_link.join_url
+        } : null,
+        link: session.call_link?.join_url || null
+      }));
+      
+      setSessions(transformedSessions);
+      setUsingMockData(false);
+    } catch (err) {
+      console.error("API Error, falling back to mock data:", err);
+      setError("Impossible de charger les sessions depuis l'API. Utilisation des données locales.");
+      setUsingMockData(true);
+      
+      // Fallback to local data if API fails
       const studentPlan = auth.user.plan;
       const filteredSessions = lseance.filter(session => 
         session.plan === studentPlan || session.plan === 'group'
       );
       setSessions(filteredSessions);
+      
+      // Simulate loading delay
+      await new Promise(resolve => setTimeout(resolve, 500));
     } finally {
       setLoading(false);
     }
@@ -735,15 +861,23 @@ const StudentDashboard = () => {
   };
 
   const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('fr-FR', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) {
+        return dateString;
+      }
+      return date.toLocaleDateString('fr-FR', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (error) {
+      console.error('Date formatting error:', error);
+      return dateString;
+    }
   };
 
   const studentQuizzes = lquizes.filter(quiz =>
@@ -812,6 +946,11 @@ const StudentDashboard = () => {
                   <span className={`plan-badge ${auth.user.plan}`}>
                     {auth.user.plan === 'group' ? 'Cours Collectifs' : 'Cours Personnalisés'}
                   </span>
+                  {usingMockData && (
+                    <span className="mock-data-badge">
+                      <i className="lni lni-warning"></i> Données locales
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
@@ -885,13 +1024,20 @@ const StudentDashboard = () => {
             <div className="sessions-container">
               <div className="section-header">
                 <h3><i className="lni lni-calendar"></i> Vos Sessions Programmes</h3>
-                <button 
-                  onClick={fetchSessions}
-                  className="refresh-btn"
-                  disabled={loading}
-                >
-                  <i className="lni lni-reload"></i> Actualiser
-                </button>
+                <div className="header-actions">
+                  <button 
+                    onClick={fetchSessions}
+                    className="refresh-btn"
+                    disabled={loading}
+                  >
+                    <i className="lni lni-reload"></i> Actualiser
+                  </button>
+                  {usingMockData && (
+                    <span className="data-source">
+                      <i className="lni lni-database"></i> Données locales
+                    </span>
+                  )}
+                </div>
               </div>
               
               {loading ? (
@@ -949,7 +1095,7 @@ const StudentDashboard = () => {
                         </div>
                         
                         <div className="session-actions">
-                          {(session.call_link || session.link) ? (
+                          {(session.call_link?.join_url || session.link) ? (
                             <button 
                               className="join-btn"
                               onClick={() => joinCall(session)}
@@ -1222,101 +1368,531 @@ const StudentDashboard = () => {
   );
 };
 
-// Home Component (simplifié pour l'exemple)
+// Home Component (Accueil) - Complete Version
 const Home = () => (
   <section className="home-section">
     <div className="container">
-      <h1>Bienvenue sur DeutschMohammed</h1>
-      <p>Apprenez l'allemand facilement depuis chez vous</p>
-      <Link to="/login" className="button">Se connecter</Link>
+      <div className="hero-section">
+        <div className="hero-content">
+          <h1>Bienvenue sur <span style={{color: "#CC0000"}}>Deutsch</span>Mohammed</h1>
+          <p className="hero-subtitle">Apprenez l'allemand facilement depuis chez vous avec un professeur expérimenté</p>
+          <div className="hero-buttons">
+            <Link to="/login" className="button button-lg">
+              <i className="lni lni-user"></i> Se connecter
+            </Link>
+            <Link to="/courses" className="button button-lg" style={{backgroundColor: "transparent", border: "2px solid #CC0000", color: "#CC0000"}}>
+              <i className="lni lni-graduation"></i> Voir nos plans
+            </Link>
+          </div>
+        </div>
+        <div className="hero-image">
+          <div className="image-placeholder-large">
+            <i className="lni lni-graduation"></i>
+          </div>
+        </div>
+      </div>
+      
+      <div className="features-section">
+        <h2 className="text-center">Pourquoi choisir DeutschMohammed ?</h2>
+        <div className="features-grid">
+          <div className="feature-card">
+            <div className="feature-icon">
+              <i className="lni lni-video"></i>
+            </div>
+            <h4>Sessions en direct</h4>
+            <p>Cours interactifs en ligne avec Zoom</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon">
+              <i className="lni lni-calendar"></i>
+            </div>
+            <h4>Emploi du temps flexible</h4>
+            <p>Choisissez les horaires qui vous conviennent</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon">
+              <i className="lni lni-pencil-alt"></i>
+            </div>
+            <h4>Quiz interactifs</h4>
+            <p>Testez vos connaissances avec nos quiz</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon">
+              <i className="lni lni-users"></i>
+            </div>
+            <h4>Support personnalisé</h4>
+            <p>Accompagnement individuel ou en groupe</p>
+          </div>
+        </div>
+      </div>
+      
+      <div className="cta-section">
+        <h2>Prêt à commencer votre apprentissage de l'allemand ?</h2>
+        <p>Rejoignez notre communauté d'étudiants satisfaits</p>
+        <Link to="/contact" className="button button-lg">
+          <i className="lni lni-phone"></i> Nous contacter
+        </Link>
+      </div>
     </div>
   </section>
 );
 
-// Courses Component (simplifié)
+// Courses Component (Plans) - Complete Version
 const Courses = () => (
-  <section className="courses-section">
+  <section className="courses-section pricing-section">
     <div className="container">
-      <h2>Nos Plans</h2>
+      <div className="section-header text-center">
+        <h2>Nos Plans d'Apprentissage</h2>
+        <p>Choisissez le plan qui correspond le mieux à vos besoins d'apprentissage</p>
+      </div>
+      
       <div className="pricing-grid">
-        <div className="single-pricing">
-          <h4>Groupe</h4>
-          <h3>300 DH</h3>
-          <ul>
-            <li>4 sessions/mois</li>
-            <li>Groupes de 4-6</li>
-          </ul>
-          <Link to="/contact" className="button">Choisir</Link>
+        <div className="single-pricing-wrapper">
+          <div className="single-pricing">
+            <h6>Idéal pour débuter</h6>
+            <h4>Groupe</h4>
+            <h3>300 DH</h3>
+            <ul>
+              <li>4 sessions/mois (2h par session)</li>
+              <li>Groupes de 4-6 étudiants</li>
+              <li>Niveau A1 à B2</li>
+              <li>Matériel pédagogique inclus</li>
+              <li>Accès aux quiz interactifs</li>
+              <li>Support par email</li>
+            </ul>
+            <Link to="/contact" className="button">Choisir ce plan</Link>
+          </div>
         </div>
-        <div className="single-pricing active">
-          <h4>Individuel</h4>
-          <h3>1500 DH</h3>
-          <ul>
-            <li>8 sessions/mois</li>
-            <li>Cours personnalisés</li>
-          </ul>
-          <Link to="/contact" className="button">Choisir</Link>
+        
+        <div className="single-pricing-wrapper">
+          <div className="single-pricing active">
+            <h6>Le plus populaire</h6>
+            <h4>Individuel</h4>
+            <h3>1500 DH</h3>
+            <ul>
+              <li>8 sessions/mois (1h par session)</li>
+              <li>Cours personnalisés 1 sur 1</li>
+              <li>Tous niveaux (A1 à C1)</li>
+              <li>Programme sur mesure</li>
+              <li>Accès complet aux ressources</li>
+              <li>Support prioritaire</li>
+              <li>Corrections détaillées</li>
+            </ul>
+            <Link to="/contact" className="button">Choisir ce plan</Link>
+          </div>
+        </div>
+        
+        <div className="single-pricing-wrapper">
+          <div className="single-pricing">
+            <h6>Pour les entreprises</h6>
+            <h4>Entreprise</h4>
+            <h3>Sur mesure</h3>
+            <ul>
+              <li>Formation pour équipes</li>
+              <li>Horaires flexibles</li>
+              <li>Programmes spécifiques</li>
+              <li>Rapports de progression</li>
+              <li>Certification officielle</li>
+              <li>Support dédié</li>
+            </ul>
+            <Link to="/contact" className="button">Demander un devis</Link>
+          </div>
+        </div>
+      </div>
+      
+      <div className="pricing-footer text-center">
+        <p>Tous nos plans incluent : Accès à la plateforme, Sessions enregistrées, Support technique</p>
+        <p className="small">*Les prix sont indiqués par mois. Engagement minimum de 3 mois.</p>
+      </div>
+    </div>
+  </section>
+);
+
+// About Component (À propos) - Complete Version
+const About = () => (
+  <section className="about-section">
+    <div className="container">
+      <div className="about-header text-center">
+        <h2>À propos de DeutschMohammed</h2>
+        <p>Votre partenaire pour l'apprentissage de l'allemand</p>
+      </div>
+      
+      <div className="about-content">
+        <div className="about-teacher">
+          <div className="teacher-image">
+            <div className="image-placeholder-circle">
+              <i className="lni lni-user"></i>
+            </div>
+          </div>
+          <div className="teacher-info">
+            <h3>Mohammed, votre professeur</h3>
+            <p>Professeur d'allemand certifié avec plus de 10 ans d'expérience dans l'enseignement des langues.</p>
+            <div className="teacher-qualifications">
+              <div className="qualification">
+                <i className="lni lni-certificate"></i>
+                <span>Diplômé en linguistique allemande</span>
+              </div>
+              <div className="qualification">
+                <i className="lni lni-graduation"></i>
+                <span>Formateur certifié Goethe-Institut</span>
+              </div>
+              <div className="qualification">
+                <i className="lni lni-world"></i>
+                <span>Expérience internationale en Allemagne</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="mission-section">
+          <h3>Notre mission</h3>
+          <p>Rendre l'apprentissage de l'allemand accessible, efficace et agréable pour tous, grâce à des méthodes pédagogiques modernes et adaptées à chaque apprenant.</p>
+        </div>
+        
+        <div className="stats-section">
+          <div className="stat-item">
+            <h4>500+</h4>
+            <p>Étudiants formés</p>
+          </div>
+          <div className="stat-item">
+            <h4>98%</h4>
+            <p>Taux de satisfaction</p>
+          </div>
+          <div className="stat-item">
+            <h4>10+</h4>
+            <p>Années d'expérience</p>
+          </div>
+          <div className="stat-item">
+            <h4>A1-C1</h4>
+            <p>Tous niveaux enseignés</p>
+          </div>
+        </div>
+        
+        <div className="testimonials">
+          <h3>Témoignages d'étudiants</h3>
+          <div className="testimonial-grid">
+            <div className="testimonial-card">
+              <div className="testimonial-text">
+                "Grâce à Mohammed, j'ai pu atteindre le niveau B2 en seulement 6 mois. Les cours sont très bien structurés."
+              </div>
+              <div className="testimonial-author">
+                <strong>Fatima E.</strong>
+                <span>Étudiante en médecine</span>
+              </div>
+            </div>
+            <div className="testimonial-card">
+              <div className="testimonial-text">
+                "Les cours en ligne sont très pratiques. Je peux apprendre depuis chez moi tout en ayant un suivi personnalisé."
+              </div>
+              <div className="testimonial-author">
+                <strong>Karim B.</strong>
+                <span>Ingénieur</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </section>
 );
 
-// About Component (simplifié)
-const About = () => (
-  <section className="about-section">
-    <div className="container">
-      <h2>À propos</h2>
-      <p>Mohammed, votre enseignant d'allemand certifié</p>
-    </div>
-  </section>
-);
+// Contact Component - Complete Version
+const Contact = () => {
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    subject: '',
+    message: ''
+  });
+  
+  const [submitted, setSubmitted] = useState(false);
+  
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    // Ici, normalement on enverrait les données à un backend
+    console.log('Form submitted:', formData);
+    setSubmitted(true);
+    setFormData({ name: '', email: '', phone: '', subject: '', message: '' });
+    
+    // Reset après 3 secondes
+    setTimeout(() => {
+      setSubmitted(false);
+    }, 3000);
+  };
+  
+  const handleChange = (e) => {
+    setFormData({
+      ...formData,
+      [e.target.name]: e.target.value
+    });
+  };
 
-// Contact Component (simplifié)
-const Contact = () => (
-  <section className="contact-section">
-    <div className="container">
-      <h2>Contact</h2>
-      <p>Contactez-nous pour plus d'informations</p>
-    </div>
-  </section>
-);
+  return (
+    <section className="contact-section">
+      <div className="container">
+        <div className="contact-header text-center">
+          <h2>Contactez-nous</h2>
+          <p>Nous sommes là pour répondre à toutes vos questions</p>
+        </div>
+        
+        <div className="contact-content">
+          <div className="contact-info">
+            <div className="info-card">
+              <div className="info-icon">
+                <i className="lni lni-phone"></i>
+              </div>
+              <h4>Téléphone</h4>
+              <p>+212 6 XX XX XX XX</p>
+              <p>Lundi - Vendredi, 9h-18h</p>
+            </div>
+            
+            <div className="info-card">
+              <div className="info-icon">
+                <i className="lni lni-envelope"></i>
+              </div>
+              <h4>Email</h4>
+              <p>contact@deutschmohammed.com</p>
+              <p>Réponse sous 24h</p>
+            </div>
+            
+            <div className="info-card">
+              <div className="info-icon">
+                <i className="lni lni-map-marker"></i>
+              </div>
+              <h4>Localisation</h4>
+              <p>Maroc</p>
+              <p>Cours 100% en ligne</p>
+            </div>
+          </div>
+          
+          <div className="contact-form-container">
+            <div className="contact-form-card">
+              <h3>Envoyez-nous un message</h3>
+              
+              {submitted && (
+                <div className="success-message">
+                  <i className="lni lni-checkmark-circle"></i>
+                  Votre message a été envoyé avec succès !
+                </div>
+              )}
+              
+              <form onSubmit={handleSubmit} className="contact-form">
+                <div className="form-row">
+                  <div className="form-group">
+                    <label htmlFor="name">Nom complet *</label>
+                    <input 
+                      type="text" 
+                      id="name"
+                      name="name"
+                      value={formData.name}
+                      onChange={handleChange}
+                      required
+                      placeholder="Votre nom"
+                    />
+                  </div>
+                  
+                  <div className="form-group">
+                    <label htmlFor="email">Email *</label>
+                    <input 
+                      type="email" 
+                      id="email"
+                      name="email"
+                      value={formData.email}
+                      onChange={handleChange}
+                      required
+                      placeholder="votre@email.com"
+                    />
+                  </div>
+                </div>
+                
+                <div className="form-row">
+                  <div className="form-group">
+                    <label htmlFor="phone">Téléphone</label>
+                    <input 
+                      type="tel" 
+                      id="phone"
+                      name="phone"
+                      value={formData.phone}
+                      onChange={handleChange}
+                      placeholder="+212 6 XX XX XX XX"
+                    />
+                  </div>
+                  
+                  <div className="form-group">
+                    <label htmlFor="subject">Sujet *</label>
+                    <select 
+                      id="subject"
+                      name="subject"
+                      value={formData.subject}
+                      onChange={handleChange}
+                      required
+                    >
+                      <option value="">Choisir un sujet</option>
+                      <option value="information">Demande d'information</option>
+                      <option value="inscription">Inscription</option>
+                      <option value="support">Support technique</option>
+                      <option value="other">Autre</option>
+                    </select>
+                  </div>
+                </div>
+                
+                <div className="form-group">
+                  <label htmlFor="message">Message *</label>
+                  <textarea 
+                    id="message"
+                    name="message"
+                    value={formData.message}
+                    onChange={handleChange}
+                    required
+                    rows="5"
+                    placeholder="Votre message..."
+                  ></textarea>
+                </div>
+                
+                <button type="submit" className="button" style={{width: '100%'}}>
+                  <i className="lni lni-send"></i> Envoyer le message
+                </button>
+              </form>
+              
+              <div className="contact-note">
+                <p><small>* Champs obligatoires. Nous respectons votre vie privée.</small></p>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="faq-section">
+          <h3 className="text-center">Questions fréquentes</h3>
+          <div className="faq-grid">
+            <div className="faq-item">
+              <h5>Comment commencer les cours ?</h5>
+              <p>Contactez-nous pour un premier entretien gratuit, puis choisissez votre plan et commencez immédiatement.</p>
+            </div>
+            <div className="faq-item">
+              <h5>Quel matériel est nécessaire ?</h5>
+              <p>Un ordinateur avec webcam, une connexion internet stable et un casque avec microphone.</p>
+            </div>
+            <div className="faq-item">
+              <h5>Puis-je changer d'horaire ?</h5>
+              <p>Oui, les horaires sont flexibles et peuvent être ajustés selon vos disponibilités.</p>
+            </div>
+            <div className="faq-item">
+              <h5>Y a-t-il un essai gratuit ?</h5>
+              <p>Oui, nous offrons une première session d'essai gratuite pour découvrir notre méthode.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
 
 // Navbar Component
+// Update the Navbar component in App.js:
 const Navbar = () => {
   const location = useLocation();
   const auth = React.useContext(AuthContext);
+  const [expanded, setExpanded] = useState(false);
   
   const isActive = (path) => location.pathname === path ? "active" : "";
 
+  const handleLinkClick = () => {
+    setExpanded(false);
+  };
+
   return (
     <header className="header">
-      <nav className="navbar">
+      <nav className="navbar navbar-expand-lg navbar-light bg-white shadow-sm">
         <div className="container">
-          <Link className="navbar-brand" to="/">
-            <span className="logo-text">DeutschMohammed</span>
+          <Link className="navbar-brand fw-bold fs-3" to="/" onClick={handleLinkClick}>
+            <span className="text-dark">Deutsch</span><span className="text-danger">Mohammed</span>
           </Link>
           
-          <div className="navbar-nav">
-            <Link className={`nav-link ${isActive("/")}`} to="/">Accueil</Link>
-            <Link className={`nav-link ${isActive("/courses")}`} to="/courses">Plans</Link>
-            <Link className={`nav-link ${isActive("/about")}`} to="/about">À propos</Link>
-            <Link className={`nav-link ${isActive("/contact")}`} to="/contact">Contact</Link>
-            
-            {auth.user ? (
-              <>
-                <Link className={`nav-link ${isActive("/dashboard")}`} to="/dashboard">
-                  Tableau de Bord
+          <button 
+            className="navbar-toggler" 
+            type="button" 
+            onClick={() => setExpanded(!expanded)}
+            aria-expanded={expanded}
+            aria-label="Toggle navigation"
+          >
+            <span className="navbar-toggler-icon"></span>
+          </button>
+          
+          <div className={`collapse navbar-collapse ${expanded ? 'show' : ''}`}>
+            <ul className="navbar-nav ms-auto mb-2 mb-lg-0">
+              <li className="nav-item">
+                <Link 
+                  className={`nav-link ${isActive("/")}`} 
+                  to="/" 
+                  onClick={handleLinkClick}
+                >
+                  <i className="lni lni-home me-1"></i> Accueil
                 </Link>
-                <button onClick={auth.logout} className="logout-btn">
-                  Déconnexion
-                </button>
-              </>
-            ) : (
-              <Link className={`nav-link ${isActive("/login")}`} to="/login">
-                Connexion
-              </Link>
-            )}
+              </li>
+              <li className="nav-item">
+                <Link 
+                  className={`nav-link ${isActive("/courses")}`} 
+                  to="/courses" 
+                  onClick={handleLinkClick}
+                >
+                  <i className="lni lni-graduation me-1"></i> Plans
+                </Link>
+              </li>
+              <li className="nav-item">
+                <Link 
+                  className={`nav-link ${isActive("/about")}`} 
+                  to="/about" 
+                  onClick={handleLinkClick}
+                >
+                  <i className="lni lni-info-circle me-1"></i> À propos
+                </Link>
+              </li>
+              <li className="nav-item">
+                <Link 
+                  className={`nav-link ${isActive("/contact")}`} 
+                  to="/contact" 
+                  onClick={handleLinkClick}
+                >
+                  <i className="lni lni-phone me-1"></i> Contact
+                </Link>
+              </li>
+              
+              {auth.user ? (
+                <>
+                  <li className="nav-item">
+                    <Link 
+                      className={`nav-link ${isActive("/dashboard")}`} 
+                      to="/dashboard" 
+                      onClick={handleLinkClick}
+                    >
+                      <i className="lni lni-dashboard me-1"></i> Tableau de Bord
+                    </Link>
+                  </li>
+                  <li className="nav-item ms-lg-2 mt-2 mt-lg-0">
+                    <button 
+                      onClick={() => {
+                        handleLinkClick();
+                        auth.logout();
+                      }} 
+                      className="btn btn-outline-danger btn-sm"
+                    >
+                      <i className="lni lni-exit me-1"></i> Déconnexion
+                    </button>
+                  </li>
+                </>
+              ) : (
+                <li className="nav-item ms-lg-2 mt-2 mt-lg-0">
+                  <Link 
+                    className={`btn btn-danger ${isActive("/login")}`} 
+                    to="/login" 
+                    onClick={handleLinkClick}
+                  >
+                    <i className="lni lni-user me-1"></i> Connexion
+                  </Link>
+                </li>
+              )}
+            </ul>
           </div>
         </div>
       </nav>
@@ -1328,7 +1904,43 @@ const Navbar = () => {
 const Footer = () => (
   <footer className="footer">
     <div className="container">
-      <p>&copy; 2024 DeutschMohammed. Tous droits réservés.</p>
+      <div className="footer-content">
+        <div className="footer-section">
+          <h4>DeutschMohammed</h4>
+          <p>Apprenez l'allemand avec un professeur expérimenté depuis chez vous.</p>
+          <div className="social-links">
+            <a href="#"><i className="lni lni-facebook"></i></a>
+            <a href="#"><i className="lni lni-instagram"></i></a>
+            <a href="#"><i className="lni lni-whatsapp"></i></a>
+            <a href="#"><i className="lni lni-youtube"></i></a>
+          </div>
+        </div>
+        
+        <div className="footer-section">
+          <h4>Liens rapides</h4>
+          <ul>
+            <li><Link to="/">Accueil</Link></li>
+            <li><Link to="/courses">Plans</Link></li>
+            <li><Link to="/about">À propos</Link></li>
+            <li><Link to="/contact">Contact</Link></li>
+            <li><Link to="/login">Connexion</Link></li>
+          </ul>
+        </div>
+        
+        <div className="footer-section">
+          <h4>Contact</h4>
+          <ul>
+            <li><i className="lni lni-phone"></i> +212 6 XX XX XX XX</li>
+            <li><i className="lni lni-envelope"></i> contact@deutschmohammed.com</li>
+            <li><i className="lni lni-map-marker"></i> Maroc</li>
+          </ul>
+        </div>
+      </div>
+      
+      <div className="footer-bottom">
+        <p>&copy; {new Date().getFullYear()} DeutschMohammed. Tous droits réservés.</p>
+        <p>Développé avec ❤️ pour l'apprentissage des langues</p>
+      </div>
     </div>
   </footer>
 );
@@ -1345,26 +1957,38 @@ const Layout = ({ children }) => (
 // Main App Component
 const App = () => {
   const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
 
   useEffect(() => {
     const savedUser = localStorage.getItem('deutsch_user');
+    const savedToken = localStorage.getItem('deutsch_token');
     if (savedUser) {
       setUser(JSON.parse(savedUser));
+    }
+    if (savedToken) {
+      setToken(savedToken);
     }
   }, []);
 
   const login = (userData) => {
     setUser(userData);
+    if (userData.token) {
+      setToken(userData.token);
+      localStorage.setItem('deutsch_token', userData.token);
+    }
     localStorage.setItem('deutsch_user', JSON.stringify(userData));
   };
 
   const logout = () => {
     setUser(null);
+    setToken(null);
     localStorage.removeItem('deutsch_user');
+    localStorage.removeItem('deutsch_token');
   };
 
   const authValue = {
     user,
+    token,
     login,
     logout
   };
